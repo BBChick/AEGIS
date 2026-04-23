@@ -1,0 +1,23 @@
+# Node.js
+node_modules/
+dist/
+dist-ssr/
+build/
+coverage/
+
+# Tauri / Rust
+src-tauri/target/
+**/*.rs.bk
+
+# Env 
+.env*
+!.env.example
+.env.local
+
+# System & Logs
+.DS_Store
+Thumbs.db
+*.log
+npm-debug.log*
+yarn-debug.log*
+pnpm-debug.log*
