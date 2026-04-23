@@ -30,7 +30,15 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
-      # ПУНКТ 1: Заменили libsoup2.4-dev на libsoup-3.0-dev (Для Linux)
+      # Насильно устанавливаем чистый WiX Toolset для Windows сборки, чтобы MSI собрался норм
+      - name: Setup WiX Toolset (Windows)
+        if: matrix.platform == 'windows-latest'
+        run: |
+          curl -L https://github.com/wixtoolset/wix3/releases/download/wix314rtm/wix314.exe -o wix-installer.exe
+          .\wix-installer.exe /install /quiet /norestart
+          echo "C:\Program Files (x86)\WiX Toolset v3.14\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+
+      # Ставим свежие зависимости Linux
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
@@ -40,7 +48,7 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
-      # ПУНКТ 2: Добавили args: --no-bundle msi, чтобы игнорировать light.exe на Windows
+      # Собираем все стандартные экзешники
       - name: Build and Release Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -53,4 +61,3 @@ jobs:
           prerelease: false
           includeRelease: true
           includeUpdaterJson: false
-          args: --no-bundle msi
