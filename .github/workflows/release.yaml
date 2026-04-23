@@ -51,4 +51,5 @@ jobs:
           releaseBody: 'Автоматическая сборка для Windows, macOS и Linux.'
           releaseDraft: false
           prerelease: false
-          args: --bundles nsis,app,dmg,deb,appimage
+          includeRelease: true
+          includeUpdaterJson: false
