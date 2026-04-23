@@ -11,7 +11,7 @@ on:
 jobs:
   release:
     permissions:
-      contents: write # Разрешение для GitHub создать страницу релиза
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -25,20 +25,22 @@ jobs:
       - name: Install Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22 # Обновили до 22 чтобы убрать warning
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      # Полный список зависимостей для Ubuntu 22.04 (чтобы не падал javascriptcore-rs)
       - name: Install Linux dependencies
         if: matrix.platform == 'ubuntu-22.04'
         run: |
           sudo apt-get update
-          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.0-dev libappindicator3-dev librsvg2-dev patchelf
+          sudo apt-get install -y gettext libglib2.0-dev libgtk-3-dev libwebkit2gtk-4.0-dev libappindicator3-dev librsvg2-dev patchelf libsoup2.4-dev build-essential curl wget webkit2gtk-driver
 
       - name: Install frontend dependencies
         run: npm install
 
+      # Добавили аргумент args, чтобы исключить сборку проблемного .msi
       - name: Build and Release Tauri app
         uses: tauri-apps/tauri-action@v0
         env:
@@ -49,3 +51,4 @@ jobs:
           releaseBody: 'Автоматическая сборка для Windows, macOS и Linux.'
           releaseDraft: false
           prerelease: false
+          args: --bundles nsis,app,dmg,deb,appimage
