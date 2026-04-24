@@ -1,4 +1,3 @@
-use std::process::Command;
 use tauri::{
     menu::{Menu, MenuItem},
     tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent},
@@ -32,8 +31,8 @@ fn secure_store_get(key: String) -> Result<String, String> {
 // =====================================================================
 // СЕТЕВОЙ LLM-МОСТ RUST (Защита от CORS и утечек заголовков)
 // =====================================================================
-use serde::{Deserialize, Serialize};
 use reqwest::Client;
+use serde::{Deserialize, Serialize};
 
 // Глобальный HTTP-клиент, чтобы использовать Connection Pooling (CWE-400 Fix)
 struct HttpState(Client);
@@ -49,11 +48,14 @@ struct AIAnalysis {
 fn extract_and_parse_json(text: &str) -> AIAnalysis {
     let json_start = text.find('{').unwrap_or(0);
     let json_end = text.rfind('}').map(|i| i + 1).unwrap_or_else(|| text.len());
-    
-    let clean_json = if json_start < json_end && text.is_char_boundary(json_start) && text.is_char_boundary(json_end) {
+
+    let clean_json = if json_start < json_end
+        && text.is_char_boundary(json_start)
+        && text.is_char_boundary(json_end)
+    {
         text.get(json_start..json_end).unwrap_or("{}")
     } else {
-        "{}" 
+        "{}"
     };
 
     serde_json::from_str(clean_json).unwrap_or_else(|_| AIAnalysis {
@@ -73,9 +75,13 @@ async fn analyze_log_bridge(
     state: tauri::State<'_, HttpState>, // Инъекция глобального клиента
 ) -> Result<AIAnalysis, String> {
     let client = &state.0;
-    
+
     // [CWE-20 Fix]: Очистка и санитизация 'locale' для защиты от Prompt Injection и Memory DoS
-    let safe_locale = if locale.len() <= 20 && locale.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+    let safe_locale = if locale.len() <= 20
+        && locale
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    {
         locale
     } else {
         "en-US".to_string()
@@ -89,7 +95,8 @@ async fn analyze_log_bridge(
             "stream": false
         });
 
-        let res = client.post("http://127.0.0.1:11434/api/generate")
+        let res = client
+            .post("http://127.0.0.1:11434/api/generate")
             .json(&payload)
             .send()
             .await
@@ -101,30 +108,40 @@ async fn analyze_log_bridge(
 
         let body: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
         let response_text = body["response"].as_str().unwrap_or("{}");
-        
+
         return Ok(extract_and_parse_json(response_text));
     }
-    
+
     // Google Gemini
     if provider == "gemini" {
         // [Logic Fix] Fallback на правильную модель, если в UI выбрана Ollama-модель
-        let safe_model = "gemini-2.5-flash"; 
-        
-        let gemini_url = format!("https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}", safe_model, token);
+        let safe_model = "gemini-2.5-flash";
+
+        let gemini_url = format!(
+            "https://generativelanguage.googleapis.com/v1beta/models/{}:generateContent?key={}",
+            safe_model, token
+        );
         let payload = serde_json::json!({
              "contents": [{
                  "parts": [{"text": format!("Проанализируй лог. ОБЯЗАТЕЛЬНО переведи техническое объяснение ошибки и шаги по решению на язык этой локали {}. Верни строго JSON: {{ \"root_cause\": \"[Суть ошибки]\", \"solution\": \"[Подробное решение]\", \"severity\": \"LOW|MEDIUM|HIGH|CRITICAL\" }}. Лог: {}", safe_locale, prompt)}]
              }]
         });
-         
-        let res = client.post(&gemini_url).json(&payload).send().await.map_err(|e| format!("Gemini Network Error: {}", e))?;
+
+        let res = client
+            .post(&gemini_url)
+            .json(&payload)
+            .send()
+            .await
+            .map_err(|e| format!("Gemini Network Error: {}", e))?;
         if !res.status().is_success() {
             return Err(format!("Gemini API Error: {}", res.status()));
         }
-         
+
         let body: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-        let text = body["candidates"][0]["content"]["parts"][0]["text"].as_str().unwrap_or("{}");
-         
+        let text = body["candidates"][0]["content"]["parts"][0]["text"]
+            .as_str()
+            .unwrap_or("{}");
+
         return Ok(extract_and_parse_json(text));
     }
 
@@ -135,9 +152,13 @@ async fn analyze_log_bridge(
         } else {
             "https://api.deepseek.com/chat/completions"
         };
-        
+
         // Подстановка правильной модели (т.к. в интерфейсе сейчас выбираются Ollama-модели)
-        let safe_model = if provider == "openai" { "gpt-4o-mini" } else { "deepseek-chat" };
+        let safe_model = if provider == "openai" {
+            "gpt-4o-mini"
+        } else {
+            "deepseek-chat"
+        };
 
         let payload = serde_json::json!({
             "model": safe_model,
@@ -155,7 +176,8 @@ async fn analyze_log_bridge(
             "temperature": 0.1
         });
 
-        let res = client.post(endpoint)
+        let res = client
+            .post(endpoint)
             .bearer_auth(token)
             .json(&payload)
             .send()
@@ -167,7 +189,9 @@ async fn analyze_log_bridge(
         }
 
         let body: serde_json::Value = res.json().await.map_err(|e| e.to_string())?;
-        let text = body["choices"][0]["message"]["content"].as_str().unwrap_or("{}");
+        let text = body["choices"][0]["message"]["content"]
+            .as_str()
+            .unwrap_or("{}");
 
         return Ok(extract_and_parse_json(text));
     }
@@ -227,35 +251,54 @@ fn open_link(app: tauri::AppHandle, target_url: String) {
     let parsed_url = match Url::parse(&target_url) {
         Ok(url) => url,
         Err(_) => {
-            eprintln!("[ЭГИДА-Security]: БЛОКИРОВКА УГРОЗЫ. Невалидный URL формат: {}", target_url);
+            eprintln!(
+                "[ЭГИДА-Security]: БЛОКИРОВКА УГРОЗЫ. Невалидный URL формат: {}",
+                target_url
+            );
             return;
         }
     };
 
     if parsed_url.scheme() != "https" {
-        eprintln!("[ЭГИДА-Security]: БЛОКИРОВКА УГРОЗЫ. Разрешен только HTTPS: {}", target_url);
+        eprintln!(
+            "[ЭГИДА-Security]: БЛОКИРОВКА УГРОЗЫ. Разрешен только HTTPS: {}",
+            target_url
+        );
         return;
     }
 
     use tauri_plugin_opener::OpenerExt;
     if let Err(e) = app.opener().open_url(&target_url, None::<&str>) {
-        eprintln!("[ЭГИДА-Opener]: Ошибка системного браузера при открытии {}: {}", target_url, e);
+        eprintln!(
+            "[ЭГИДА-Opener]: Ошибка системного браузера при открытии {}: {}",
+            target_url, e
+        );
     }
 }
 
 #[tauri::command]
 fn check_ollama() -> bool {
-    // Прямой вызов бинарника (Shell Injection невозможен)
-    match Command::new("ollama").arg("--version").output() {
+    let mut cmd = std::process::Command::new("ollama");
+    cmd.arg("--version");
+
+    // ДОБАВЛЕННЫЙ БЛОК: Запрещаем Windows рисовать черное окно терминала
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        cmd.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    match cmd.output() {
         Ok(output) => {
             let is_success = output.status.success();
             if !is_success {
-                eprintln!("[ЭГИДА-Ollama]: Процесс найден, но вернул ошибку выполнения.");
+                eprintln!("[ЭГИДА-Ollama]: Процесс найден, но вернул ошибку.");
             }
             is_success
         }
         Err(e) => {
-            eprintln!("[ЭГИДА-Ollama]: Ядро Ollama не отвечает. Причина: {}", e);
+            eprintln!("[ЭГИДА-Ollama]: Ядро Ollama не отвечает: {}", e);
             false
         }
     }
@@ -273,6 +316,7 @@ pub fn run() {
         .expect("Failed to build HTTP client");
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_http::init())
         // Инициализируем глобальный HTTP-пул для предотвращения Socket Exhaustion
         .manage(HttpState(http_client))
         .plugin(tauri_plugin_notification::init())

@@ -8,6 +8,7 @@ import { motion, AnimatePresence } from 'framer-motion';
 import { Virtuoso } from 'react-virtuoso';
 import { invoke } from '@tauri-apps/api/core';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
+import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
 
 // --- КОНСТАНТЫ И БЕЗОПАСНОСТЬ (РБПО ГОСТ) ---
 const OLLAMA_MODELS = [
@@ -71,22 +72,39 @@ function useSecureStore() {
 
 function useOllamaHealth() {
   const [status, setStatus] = useState<'online' | 'offline' | 'missing' | 'checking'>('checking');
+
   useEffect(() => {
-    const ac = new AbortController();
+    let isMounted = true;
+
     async function check() {
       try {
-        const res = await fetch('http://127.0.0.1:11434/', { signal: ac.signal });
-        if (res.ok) { setStatus('online'); return; }
-      } catch (e) { }
+        const res = await tauriFetch('http://127.0.0.1:11434/', {
+          method: 'GET',
+          connectTimeout: 2000
+        });
+
+        if (res.ok && isMounted) {
+          setStatus('online');
+          return;
+        }
+      } catch (e) {
+      }
       try {
         const isInstalled = await invoke<boolean>('check_ollama');
-        setStatus(isInstalled ? 'offline' : 'missing');
-      } catch (e) { setStatus('missing'); }
+        if (isMounted) setStatus(isInstalled ? 'offline' : 'missing');
+      } catch (e) {
+        if (isMounted) setStatus('missing');
+      }
     }
+
     check();
     const iv = setInterval(check, 5000);
-    return () => { clearInterval(iv); ac.abort(); };
+    return () => {
+      isMounted = false;
+      clearInterval(iv);
+    };
   }, []);
+
   return status;
 }
 
@@ -98,7 +116,7 @@ function useLocalModels() {
 
   const fetchInstalled = async () => {
     try {
-      const res = await fetch('http://127.0.0.1:11434/api/tags');
+      const res = await tauriFetch('http://127.0.0.1:11434/api/tags');
       if (!res.ok) throw new Error("API failed");
       const data = await res.json();
       if (!data?.models) throw new Error("Invalid format");
@@ -108,7 +126,7 @@ function useLocalModels() {
 
   const remove = async (id: string, cb: () => void) => {
     try {
-      await fetch('http://127.0.0.1:11434/api/delete', { method: 'DELETE', body: JSON.stringify({ name: id }) });
+      await tauriFetch('http://127.0.0.1:11434/api/delete', { method: 'DELETE', body: JSON.stringify({ name: id }) });
       await fetchInstalled(); cb();
     } catch (e: any) { alert("[Tauri-Ollama]: Ошибка удаления: " + e.message); }
   };
@@ -120,7 +138,7 @@ function useLocalModels() {
 
     try {
       setPulling(id); setProgress('Инициализация...');
-      const res = await fetch('http://127.0.0.1:11434/api/pull', {
+      const res = await tauriFetch('http://127.0.0.1:11434/api/pull', {
         method: 'POST',
         body: JSON.stringify({ name: id }),
         signal: ac.signal
