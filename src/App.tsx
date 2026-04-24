@@ -28,7 +28,7 @@ interface AIAnalysis { root_cause: string; solution: string; severity: string; }
 const maskSensitiveData = (text: string) => {
   return text
     .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '[REDACTED_IPv4]')
-    .replace(/[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/g, '[REDACTED_EMAIL]')
+    .replace(/[^\s@]+@[^\s@]+\.[A-Za-z0-9]{2,}/g, '[REDACTED_EMAIL]')
     .replace(/(bearer|token|apikey|password|secret|key)[\s=:]+["']?[a-zA-Z0-9\-_+/=]+["']?/gi, '$1=[REDACTED]')
     .replace(/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, '[REDACTED_JWT]');
 };
@@ -70,7 +70,7 @@ function useSecureStore() {
   return { apiKey, save };
 }
 
-function useOllamaHealth() {
+function useOllamaHealth(host: string) {
   const [status, setStatus] = useState<'online' | 'offline' | 'missing' | 'checking'>('checking');
 
   useEffect(() => {
@@ -78,10 +78,14 @@ function useOllamaHealth() {
 
     async function check() {
       try {
-        const res = await tauriFetch('http://127.0.0.1:11434/', {
+        const ac = new AbortController();
+        const timeoutId = setTimeout(() => ac.abort(), 2500);
+        const res = await tauriFetch(host, {
           method: 'GET',
-          connectTimeout: 2000
+          connectTimeout: 2000,
+          signal: ac.signal
         });
+        clearTimeout(timeoutId);
 
         if (res.ok && isMounted) {
           setStatus('online');
@@ -103,20 +107,25 @@ function useOllamaHealth() {
       isMounted = false;
       clearInterval(iv);
     };
-  }, []);
+  }, [host]);
 
   return status;
 }
 
-function useLocalModels() {
+function useLocalModels(host: string) {
   const [installed, setInstalled] = useState<string[]>([]);
   const [pulling, setPulling] = useState<string | null>(null);
   const [progress, setProgress] = useState('');
   const [pullController, setPullController] = useState<AbortController | null>(null);
 
+  const cleanHost = host.replace(/\/+$/, '');
+
   const fetchInstalled = async () => {
     try {
-      const res = await tauriFetch('http://127.0.0.1:11434/api/tags');
+      const ac = new AbortController();
+      const timeoutId = setTimeout(() => ac.abort(), 3500);
+      const res = await tauriFetch(`${cleanHost}/api/tags`, { connectTimeout: 3000, signal: ac.signal });
+      clearTimeout(timeoutId);
       if (!res.ok) throw new Error("API failed");
       const data = await res.json();
       if (!data?.models) throw new Error("Invalid format");
@@ -126,9 +135,9 @@ function useLocalModels() {
 
   const remove = async (id: string, cb: () => void) => {
     try {
-      await tauriFetch('http://127.0.0.1:11434/api/delete', { method: 'DELETE', body: JSON.stringify({ name: id }) });
+      await tauriFetch(`${cleanHost}/api/delete`, { method: 'DELETE', body: JSON.stringify({ name: id }), connectTimeout: 5000 });
       await fetchInstalled(); cb();
-    } catch (e: any) { alert("[Tauri-Ollama]: Ошибка удаления: " + e.message); }
+    } catch (e: any) { popNotification("ОШИБКА OLLAMA", "Не удалось удалить: " + e.message); }
   };
 
   const download = async (id: string, cb: () => void) => {
@@ -138,32 +147,40 @@ function useLocalModels() {
 
     try {
       setPulling(id); setProgress('Инициализация...');
-      const res = await tauriFetch('http://127.0.0.1:11434/api/pull', {
+      const res = await tauriFetch(`${cleanHost}/api/pull`, {
         method: 'POST',
         body: JSON.stringify({ name: id }),
-        signal: ac.signal
+        signal: ac.signal,
+        connectTimeout: 5000
       });
       if (!res.body) throw new Error("Stream error");
       const reader = res.body.getReader();
       const decoder = new TextDecoder();
+      let buffer = '';
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split('\n');
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
         for (const line of lines) {
           if (!line.trim()) continue;
           try {
             const blob = JSON.parse(line);
             if (blob.total && blob.completed) setProgress(`ЗАГРУЗКА: ${Math.round((blob.completed / blob.total) * 100)}%`);
             else setProgress(blob.status ? blob.status.toUpperCase() : 'СБОРКА...');
-          } catch (jsonErr) { }
+          } catch (jsonErr) {
+            console.warn("[Tauri-Ollama]: JSON Parse Error on Pull chunk", jsonErr);
+          }
         }
       }
       await popNotification('ЭГИДА', `Модуль ${id} готов.`);
-      fetchInstalled(); setPulling(null); setPullController(null); cb();
+      if (!ac.signal.aborted) {
+        fetchInstalled(); setPulling(null); setPullController(null); cb();
+      }
     } catch (e: any) {
-      if (e.name !== 'AbortError') {
+      if (e.name !== 'AbortError' && !ac.signal.aborted) {
         setProgress(`СБОЙ: ${e.message}`);
         setTimeout(() => setPulling(null), 3000);
       }
@@ -211,7 +228,7 @@ const LogItem = memo(({ log, index, report, isActive, localError, onAnalyze }: a
 
             {isDangerous && (
               <div className="mb-2 text-[10px] bg-red-500 text-white p-2 font-bold uppercase flex items-center gap-2">
-                <AlertTriangle size={12} /> Внимание! Предложенная команда модифицирует ФС или сеть (DLP/Injection Guard).
+                <AlertTriangle size={12} /> Внимание! Эвристический анализатор выявил деструктивные команды. Не выполняйте без ручной проверки.
               </div>
             )}
             <div className="space-y-2">
@@ -249,6 +266,19 @@ export default function App() {
   const [localErrors, setLocalErrors] = useState<Record<string, string>>({});
   const [workingFile, setWorkingFile] = useState<string | null>(null);
   const [configOpen, setConfigOpen] = useState(false);
+  const [customModelTag, setCustomModelTag] = useState('');
+  const [ollamaHost, setOllamaHost] = useState(() => localStorage.getItem('OLLAMA_HOST') || 'http://127.0.0.1:11434');
+  const [draftOllamaHost, setDraftOllamaHost] = useState(() => localStorage.getItem('OLLAMA_HOST') || 'http://127.0.0.1:11434');
+
+  const applyNetworkConfig = useCallback(() => {
+    try {
+      const parsed = new URL(draftOllamaHost);
+      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('Invalid scheme');
+      setOllamaHost(draftOllamaHost.replace(/\/+$/, ''));
+    } catch (e) {
+      setDraftOllamaHost(ollamaHost);
+    }
+  }, [draftOllamaHost, ollamaHost]);
 
   const [provider, setProvider] = useState<'gemini' | 'openai' | 'deepseek' | 'ollama'>(() => {
     return (localStorage.getItem('AEGIS_PROVIDER') as any) || 'gemini';
@@ -263,9 +293,13 @@ export default function App() {
     localStorage.setItem('OLLAMA_MODEL', modelHash);
   }, [modelHash]);
 
+  useEffect(() => {
+    localStorage.setItem('OLLAMA_HOST', ollamaHost);
+  }, [ollamaHost]);
+
   const { apiKey, save: setApiKey } = useSecureStore();
-  const ollamaStatus = useOllamaHealth();
-  const engines = useLocalModels();
+  const ollamaStatus = useOllamaHealth(ollamaHost);
+  const engines = useLocalModels(ollamaHost);
 
   // OOM-Save (CWE-400): Stream API Parser для обработки гигантских логов
   const fileReaderController = useRef<AbortController | null>(null);
@@ -275,6 +309,12 @@ export default function App() {
     if (!file) return;
     setWorkingFile(file.name);
 
+    // Сброс состояния предыдущего файла (Fix State Bleed CWE-200)
+    setRawLogs([]);
+    setReports({});
+    setActiveJobs({});
+    setLocalErrors({});
+
     // Блокировка гонки состояний (Race Condition)
     if (fileReaderController.current) {
       fileReaderController.current.abort();
@@ -283,13 +323,15 @@ export default function App() {
     fileReaderController.current = ac;
 
     try {
+      // NOTE (DLP): В перспективе рекомендуется вынести первичный парсинг и маскировку логов (DLP)
+      // в Web Worker или на сторону Rust-бэкенда, чтобы не блокировать Main Thread.
       const stream = file.stream();
       const reader = stream.getReader();
       const decoder = new TextDecoder();
       let partialLine = '';
       let lineCounter = 0;
-      const MAX_LINES = 50000; // Жёсткий лимит защиты V8 RAM
-      const MAX_LINE_LENGTH = 30000; // Защита от OOM при отсутствии переносов строк (Огромные DUMP/JSON)
+      const MAX_LINES = 10000; // Жёсткий лимит защиты V8 RAM
+      const MAX_LINE_LENGTH = 5000; // Защита от OOM при отсутствии переносов строк (Огромные DUMP/JSON)
       const newLogs: LogEntry[] = [];
 
       try {
@@ -305,20 +347,6 @@ export default function App() {
           const text = decoder.decode(value, { stream: true });
           partialLine += text;
 
-          // Защита от бинарных файлов и бесконечных строк
-          if (partialLine.length > MAX_LINE_LENGTH * 2) {
-            const chunk = partialLine.substring(0, MAX_LINE_LENGTH);
-            partialLine = partialLine.substring(MAX_LINE_LENGTH); // Оставляем хвост
-
-            newLogs.push({
-              id: `L${lineCounter++}`,
-              rawLine: chunk + '... [TRUNCATED_BY_AEGIS]',
-              maskedLine: maskSensitiveData(chunk) + '... [TRUNCATED]',
-              isError: /(error|fail|panic|exception|fatal|warn|killed)/i.test(chunk)
-            });
-          }
-
-          // Парсинг нормальных строк
           if (partialLine.includes('\n')) {
             const lines = partialLine.split('\n');
             partialLine = lines.pop() || ''; // Последний кусок (без \n) оставляем в буфере
@@ -340,6 +368,17 @@ export default function App() {
                 break;
               }
             }
+          } else if (partialLine.length > MAX_LINE_LENGTH * 2) {
+            // Защита от бинарных файлов и бесконечных строк БЕЗ переносов
+            const chunk = partialLine.substring(0, MAX_LINE_LENGTH);
+            partialLine = ''; // Очищаем буфер, ИНАЧЕ хвост станет "новой строкой" (Fix Audit Minor 2)
+
+            newLogs.push({
+              id: `L${lineCounter++}`,
+              rawLine: chunk + '... [TRUNCATED_BY_AEGIS]',
+              maskedLine: maskSensitiveData(chunk) + '... [TRUNCATED]',
+              isError: /(error|fail|panic|exception|fatal|warn|killed)/i.test(chunk)
+            });
           }
           if (newLogs.length >= MAX_LINES) break;
         }
@@ -366,10 +405,10 @@ export default function App() {
     }
   };
 
-  const authState = useRef({ apiKey, provider, modelHash });
+  const authState = useRef({ apiKey, provider, modelHash, ollamaHost });
   useEffect(() => {
-    authState.current = { apiKey, provider, modelHash };
-  }, [apiKey, provider, modelHash]);
+    authState.current = { apiKey, provider, modelHash, ollamaHost };
+  }, [apiKey, provider, modelHash, ollamaHost]);
 
   const runAnalysis = useCallback(async (log: LogEntry) => {
     const currentAuth = authState.current;
@@ -382,18 +421,25 @@ export default function App() {
     setActiveJobs(prev => ({ ...prev, [log.id]: true }));
     setLocalErrors(prev => ({ ...prev, [log.id]: '' }));
 
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
+
     try {
-      // IPC Timeout Timeout Guard (Предотвращение бесконечного ожидания ответа AI)
+      // IPC Timeout Timeout Guard + Job ID для отмены (CWE-400 Fix)
       const invokePromise = invoke<AIAnalysis>('analyze_log_bridge', {
+        job_id: log.id,
         provider: currentAuth.provider,
         token: currentAuth.apiKey,
         model: currentAuth.modelHash,
         prompt: log.maskedLine,
-        locale: navigator.language || 'en-US' // Динамический язык системы
+        locale: navigator.language || 'en-US',
+        ollama_host: currentAuth.ollamaHost
       });
 
       const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => reject(new Error('TIMEOUT_ERROR: Ответ от LLM не получен (превышен лимит 60 сек). Проверьте статус локального узла Ollama или подключение к облаку.')), 60000);
+        timeoutId = setTimeout(() => {
+          invoke('abort_analysis', { job_id: log.id }).catch(() => { });
+          reject(new Error('TIMEOUT_ERROR: Ответ от LLM не получен (превышен лимит 60 сек).'));
+        }, 60000);
       });
 
       const result = await Promise.race([invokePromise, timeoutPromise]);
@@ -401,6 +447,9 @@ export default function App() {
     } catch (err: any) {
       setLocalErrors(prev => ({ ...prev, [log.id]: err.toString() }));
     } finally {
+      if (timeoutId !== undefined) {
+        clearTimeout(timeoutId);
+      }
       setActiveJobs(prev => ({ ...prev, [log.id]: false }));
     }
   }, []);
@@ -437,6 +486,27 @@ export default function App() {
               </div>
 
               <div className="p-6 overflow-y-auto flex flex-col gap-8 font-mono text-sm">
+                <div>
+                  <h3 className="font-bold border-b-2 border-black/20 dark:border-white/20 pb-2 mb-4 uppercase flex items-center gap-2">
+                    <Zap className="w-4 h-4 text-zinc-500" /> СЕТЕВАЯ КОНФИГУРАЦИЯ УЗЛА
+                  </h3>
+                  <div className="flex gap-4">
+                    <input
+                      type="text"
+                      value={draftOllamaHost}
+                      onChange={e => setDraftOllamaHost(e.target.value)}
+                      onBlur={applyNetworkConfig}
+                      placeholder="http://127.0.0.1:11434"
+                      className="flex-1 p-3 border-2 border-[#111] dark:border-[#1c1c1c] bg-[#ddd] dark:bg-[#111] text-[#111] dark:text-[#E0E0E0] outline-none font-mono text-xs focus:border-black dark:focus:border-white transition-colors"
+                    />
+                    <button
+                      onClick={applyNetworkConfig}
+                      className="px-6 py-2 border-2 font-bold uppercase text-xs transition-colors border-black dark:border-white hover:bg-black dark:hover:bg-white hover:text-white dark:hover:text-black">
+                      ПРИМЕНИТЬ
+                    </button>
+                  </div>
+                </div>
+
                 {/* Local Models Box */}
                 <div>
                   <h3 className="font-bold border-b-2 border-black/20 dark:border-white/20 pb-2 mb-4 uppercase flex items-center gap-2">
@@ -496,14 +566,13 @@ export default function App() {
                 {/* Install Panel */}
                 <div className="mt-6 flex flex-col gap-2">
                   <input type="text" placeholder="CUSTOM_MODEL:TAG"
-                    onChange={e => {
-                      e.target.value = sanitizeInputTag(e.target.value);
-                    }}
+                    value={customModelTag}
+                    onChange={e => setCustomModelTag(e.target.value)}
                     className="flex-1 p-3 border-2 border-[#111] dark:border-[#1c1c1c] bg-[#ddd] dark:bg-[#111] text-[#111] dark:text-[#E0E0E0] outline-none font-mono text-xs uppercase focus:border-black dark:focus:border-white transition-colors"
-                    id="custom-model-inject" />
+                  />
                   <button onClick={() => {
-                    const val = (document.getElementById('custom-model-inject') as HTMLInputElement)?.value;
-                    if (val) engines.download(val, () => setModelHash(val));
+                    const val = sanitizeInputTag(customModelTag);
+                    if (val) engines.download(val, () => { setModelHash(val); setCustomModelTag(''); });
                   }} className="px-8 py-3 border-2 font-bold uppercase text-xs transition-colors border-black dark:border-white hover:bg-black dark:hover:bg-white hover:text-white dark:hover:text-black">
                     ИНЪЕКЦИЯ
                   </button>
