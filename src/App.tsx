@@ -7,8 +7,8 @@ import {
 import { motion, AnimatePresence } from 'framer-motion';
 import { Virtuoso } from 'react-virtuoso';
 import { invoke } from '@tauri-apps/api/core';
+import { listen } from '@tauri-apps/api/event';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
-import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
 
 // --- КОНСТАНТЫ И БЕЗОПАСНОСТЬ ---
 const OLLAMA_MODELS = [
@@ -55,11 +55,7 @@ function useSecureStore() {
 
   const save = async (val: string) => {
     setApiKey(val);
-    try {
-      await invoke('secure_store_set', { key: 'SECRET_API_KEY_V2', value: val });
-    } catch (err) {
-      console.warn("[ЭГИДА-Store]: Fallback на in-memory (Stronghold недоступен).");
-    }
+    try { await invoke('secure_store_set', { key: 'SECRET_API_KEY_V2', value: val }); } catch (err) { }
   };
   return { apiKey, save };
 }
@@ -69,16 +65,10 @@ function useOllamaHealth(host: string) {
 
   useEffect(() => {
     let isMounted = true;
-
     async function check() {
       try {
-        //[ИСПРАВЛЕНИЕ АРХИТЕКТУРЫ]: Делегируем пинг сети в Rust. 
-        // Это обходит блокировку HTTP запросов в WebView (Tauri Capabilities / CORS), возникающую в PROD сборке.
         const isOnline = await invoke<boolean>('ping_ollama', { host });
-        if (isOnline && isMounted) {
-          setStatus('online');
-          return;
-        }
+        if (isOnline && isMounted) { setStatus('online'); return; }
       } catch (e) { }
 
       try {
@@ -88,7 +78,6 @@ function useOllamaHealth(host: string) {
         if (isMounted) setStatus('missing');
       }
     }
-
     check();
     const iv = setInterval(check, 5000);
     return () => { isMounted = false; clearInterval(iv); };
@@ -101,73 +90,45 @@ function useLocalModels(host: string) {
   const [installed, setInstalled] = useState<string[]>([]);
   const [pulling, setPulling] = useState<string | null>(null);
   const [progress, setProgress] = useState('');
-  const [pullController, setPullController] = useState<AbortController | null>(null);
 
   const cleanHost = host.replace(/\/+$/, '');
 
   const fetchInstalled = async () => {
     try {
-      const ac = new AbortController();
-      const timeoutId = setTimeout(() => ac.abort(), 3500);
-      const res = await tauriFetch(`${cleanHost}/api/tags`, { connectTimeout: 3000, signal: ac.signal });
-      clearTimeout(timeoutId);
-      if (!res.ok) throw new Error("API failed");
-      const data = await res.json();
-      if (!data?.models) throw new Error("Invalid format");
-      setInstalled(data.models.map((m: any) => m.name));
+      const models = await invoke<string[]>('get_ollama_models', { host: cleanHost });
+      setInstalled(models);
     } catch { setInstalled([]); }
   };
 
   const remove = async (id: string, cb: () => void) => {
     try {
-      await tauriFetch(`${cleanHost}/api/delete`, { method: 'DELETE', body: JSON.stringify({ name: id }), connectTimeout: 5000 });
+      await invoke('delete_ollama_model', { host: cleanHost, name: id });
       await fetchInstalled(); cb();
-    } catch (e: any) { popNotification("ОШИБКА OLLAMA", "Не удалось удалить: " + e.message); }
+    } catch (e: any) { popNotification("ОШИБКА OLLAMA", "Не удалось удалить: " + e); }
   };
 
   const download = async (id: string, cb: () => void) => {
-    if (pullController) pullController.abort();
-    const ac = new AbortController();
-    setPullController(ac);
-
     try {
       setPulling(id); setProgress('Инициализация...');
-      const res = await tauriFetch(`${cleanHost}/api/pull`, {
-        method: 'POST', body: JSON.stringify({ name: id }), signal: ac.signal, connectTimeout: 5000
-      });
-      if (!res.body) throw new Error("Stream error");
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() || '';
 
-        for (const line of lines) {
-          if (!line.trim()) continue;
-          try {
-            const blob = JSON.parse(line);
-            if (blob.total && blob.completed) setProgress(`ЗАГРУЗКА: ${Math.round((blob.completed / blob.total) * 100)}%`);
-            else setProgress(blob.status ? blob.status.toUpperCase() : 'СБОРКА...');
-          } catch (jsonErr) { }
-        }
-      }
+      const unlisten = await listen<string>('ollama-pull-update', (event) => {
+        try {
+          const blob = JSON.parse(event.payload);
+          if (blob.total && blob.completed) setProgress(`ЗАГРУЗКА: ${Math.round((blob.completed / blob.total) * 100)}%`);
+          else setProgress(blob.status ? blob.status.toUpperCase() : 'СБОРКА...');
+        } catch (err) { }
+      });
+
+      await invoke('pull_ollama_model', { host: cleanHost, name: id });
+
+      unlisten();
       await popNotification('ЭГИДА', `Модуль ${id} готов.`);
-      if (!ac.signal.aborted) {
-        fetchInstalled(); setPulling(null); setPullController(null); cb();
-      }
+      fetchInstalled(); setPulling(null); cb();
     } catch (e: any) {
-      if (e.name !== 'AbortError' && !ac.signal.aborted) {
-        setProgress(`СБОЙ: ${e.message}`);
-        setTimeout(() => setPulling(null), 3000);
-      }
+      setProgress(`СБОЙ: ${e}`);
+      setTimeout(() => setPulling(null), 3000);
     }
   };
-
-  useEffect(() => { return () => pullController?.abort(); }, [pullController]);
 
   return { installed, pulling, progress, fetchInstalled, remove, download };
 }
@@ -345,15 +306,22 @@ export default function App() {
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
     try {
+      // [ИСПРАВЛЕНИЕ IPC]: Tauri требует строгого соблюдения camelCase ключей для вызовов Rust
+      // Rust `job_id` -> Frontend `jobId`
+      // Rust `ollama_host` -> Frontend `ollamaHost`
       const invokePromise = invoke<AIAnalysis>('analyze_log_bridge', {
-        job_id: log.id, provider: currentAuth.provider, token: currentAuth.apiKey,
-        model: currentAuth.modelHash, prompt: log.maskedLine,
-        locale: navigator.language || 'en-US', ollama_host: currentAuth.ollamaHost
+        jobId: log.id,
+        provider: currentAuth.provider,
+        token: currentAuth.apiKey,
+        model: currentAuth.modelHash,
+        prompt: log.maskedLine,
+        locale: navigator.language || 'en-US',
+        ollamaHost: currentAuth.ollamaHost
       });
 
       const timeoutPromise = new Promise<never>((_, reject) => {
         timeoutId = setTimeout(() => {
-          invoke('abort_analysis', { job_id: log.id }).catch(() => { });
+          invoke('abort_analysis', { jobId: log.id }).catch(() => { });
           reject(new Error('TIMEOUT_ERROR: Ответ от LLM не получен (превышен лимит 60 сек).'));
         }, 60000);
       });
@@ -392,7 +360,7 @@ export default function App() {
             <div onClick={(e) => e.stopPropagation()} className="bg-[#f4f2ee] dark:bg-[#0A0A0A] border-4 border-[#111] dark:border-[#1c1c1c] w-full max-w-4xl max-h-[85vh] flex flex-col shadow-[16px_16px_0_0_rgba(0,0,0,0.6)]">
               <div className="text-white font-bold p-4 flex justify-between items-center text-sm uppercase bg-orange-500 dark:bg-orange-600">
                 <span className="flex items-center gap-2"><HardDrive className="w-5 h-5" /> Управление узлами (OLLAMA_CORE)</span>
-                <button onClick={() => setConfigOpen(false)} className="px-3 py-1 bg-black/20 hover:bg-black/50 transition border border-white/20">ЗАКРЫТЬ [X]</button>
+                <button onClick={() => setConfigOpen(false)} className="px-3 py-1 bg-black/20 hover:bg-black/50 transition border border-white/20">ЗАКРЫТЬ[X]</button>
               </div>
 
               <div className="p-6 overflow-y-auto flex flex-col gap-8 font-mono text-sm">
