@@ -10,7 +10,7 @@ import { invoke } from '@tauri-apps/api/core';
 import { isPermissionGranted, requestPermission, sendNotification } from '@tauri-apps/plugin-notification';
 import { fetch as tauriFetch } from '@tauri-apps/plugin-http';
 
-// --- КОНСТАНТЫ И БЕЗОПАСНОСТЬ (РБПО ГОСТ) ---
+// --- КОНСТАНТЫ И БЕЗОПАСНОСТЬ ---
 const OLLAMA_MODELS = [
   { id: 'phi3:mini', name: 'Microsoft Phi-3 Mini', params: '3.8B', desc: 'База. Быстрая, логику тянет нормально.', tag: '⚡ REC' },
   { id: 'qwen2.5:0.5b', name: 'Alibaba Qwen 2.5', params: '0.5B', desc: 'Быстрая, но может галлюцинировать.', tag: '🚀 SPEED' },
@@ -18,22 +18,20 @@ const OLLAMA_MODELS = [
   { id: 'deepseek-coder-v2', name: 'DeepSeek Coder', params: '16B', desc: 'Для машин с мощной VRAM.', tag: '💻 DEV' }
 ];
 
-// Усиленный паттерн: перехват пайпов, сетевых утилит и системных мутаций (DLP / Shell Inject)
 const DANGEROUS_REGEX = /(\b(?:rm|mkfs|chmod|chown|dd|wget|curl|nc|netcat|mv|rmdir|eval|exec|sh|bash|zsh|powershell|cmd)\b|[>|&;]\s*\/(?:dev|etc|bin|sbin|usr|var)|\/dev\/(null|random|zero|tcp|udp))/i;
 
 interface LogEntry { id: string; rawLine: string; maskedLine: string; isError: boolean; }
 interface AIAnalysis { root_cause: string; solution: string; severity: string; }
 
-// --- СИСТЕМА ЗАЩИТЫ ОТ УТЕЧЕК (DLP) ---
 const maskSensitiveData = (text: string) => {
   return text
-    .replace(/\b(?:\d{1,3}\.){3}\d{1,3}\b/g, '[REDACTED_IPv4]')
-    .replace(/[^\s@]+@[^\s@]+\.[A-Za-z0-9]{2,}/g, '[REDACTED_EMAIL]')
-    .replace(/(bearer|token|apikey|password|secret|key)[\s=:]+["']?[a-zA-Z0-9\-_+/=]+["']?/gi, '$1=[REDACTED]')
-    .replace(/eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g, '[REDACTED_JWT]');
+    .replace(/\b(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\.(?:25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)\b/g, '[REDACTED_IPv4]')
+    .replace(/[a-zA-Z0-9.!#$%&'*+/=?^_`{|}~-]+@[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+/g, '[REDACTED_EMAIL]')
+    .replace(/(?:bearer|token|apikey|password|secret|key)[\s=:]+["']?[a-zA-Z0-9\-_+/=]{5,}["']?/gi, '$1=[REDACTED]')
+    .replace(/eyJ[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}\.[a-zA-Z0-9_-]{10,}/g, '[REDACTED_JWT]');
 };
 
-const sanitizeInputTag = (tag: string) => tag.replace(/[^a-zA-Z0-9\-\.\:]/g, ''); // Защита от Injection в Ollama Runtime
+const sanitizeInputTag = (tag: string) => tag.replace(/[^a-zA-Z0-9\-\.\:]/g, '');
 
 const popNotification = async (title: string, body: string) => {
   try {
@@ -43,14 +41,11 @@ const popNotification = async (title: string, body: string) => {
   } catch (err) { console.error("[ЭГИДА-Notify]:", err); }
 };
 
-// --- СИСТЕМНЫЕ ХУКИ ---
 function useSecureStore() {
   const [apiKey, setApiKey] = useState('');
-
   useEffect(() => {
     async function init() {
       try {
-        // Запрос к Rust-бэкенду на получение секрета из системного Keychain (Stronghold)
         const saved = await invoke<string>('secure_store_get', { key: 'SECRET_API_KEY_V2' }).catch(() => '');
         if (saved) setApiKey(saved);
       } catch (err) { console.warn("[ЭГИДА-Store]: Ошибка защищенного хранилища."); }
@@ -61,7 +56,6 @@ function useSecureStore() {
   const save = async (val: string) => {
     setApiKey(val);
     try {
-      // Сохранение идет в изолированную память Rust (Keyring/Stronghold)
       await invoke('secure_store_set', { key: 'SECRET_API_KEY_V2', value: val });
     } catch (err) {
       console.warn("[ЭГИДА-Store]: Fallback на in-memory (Stronghold недоступен).");
@@ -78,21 +72,15 @@ function useOllamaHealth(host: string) {
 
     async function check() {
       try {
-        const ac = new AbortController();
-        const timeoutId = setTimeout(() => ac.abort(), 2500);
-        const res = await tauriFetch(host, {
-          method: 'GET',
-          connectTimeout: 2000,
-          signal: ac.signal
-        });
-        clearTimeout(timeoutId);
-
-        if (res.ok && isMounted) {
+        //[ИСПРАВЛЕНИЕ АРХИТЕКТУРЫ]: Делегируем пинг сети в Rust. 
+        // Это обходит блокировку HTTP запросов в WebView (Tauri Capabilities / CORS), возникающую в PROD сборке.
+        const isOnline = await invoke<boolean>('ping_ollama', { host });
+        if (isOnline && isMounted) {
           setStatus('online');
           return;
         }
-      } catch (e) {
-      }
+      } catch (e) { }
+
       try {
         const isInstalled = await invoke<boolean>('check_ollama');
         if (isMounted) setStatus(isInstalled ? 'offline' : 'missing');
@@ -103,10 +91,7 @@ function useOllamaHealth(host: string) {
 
     check();
     const iv = setInterval(check, 5000);
-    return () => {
-      isMounted = false;
-      clearInterval(iv);
-    };
+    return () => { isMounted = false; clearInterval(iv); };
   }, [host]);
 
   return status;
@@ -141,17 +126,14 @@ function useLocalModels(host: string) {
   };
 
   const download = async (id: string, cb: () => void) => {
-    if (pullController) pullController.abort(); // Отмена старого стрима (СWE-400 Memory Leak Fix)
+    if (pullController) pullController.abort();
     const ac = new AbortController();
     setPullController(ac);
 
     try {
       setPulling(id); setProgress('Инициализация...');
       const res = await tauriFetch(`${cleanHost}/api/pull`, {
-        method: 'POST',
-        body: JSON.stringify({ name: id }),
-        signal: ac.signal,
-        connectTimeout: 5000
+        method: 'POST', body: JSON.stringify({ name: id }), signal: ac.signal, connectTimeout: 5000
       });
       if (!res.body) throw new Error("Stream error");
       const reader = res.body.getReader();
@@ -170,9 +152,7 @@ function useLocalModels(host: string) {
             const blob = JSON.parse(line);
             if (blob.total && blob.completed) setProgress(`ЗАГРУЗКА: ${Math.round((blob.completed / blob.total) * 100)}%`);
             else setProgress(blob.status ? blob.status.toUpperCase() : 'СБОРКА...');
-          } catch (jsonErr) {
-            console.warn("[Tauri-Ollama]: JSON Parse Error on Pull chunk", jsonErr);
-          }
+          } catch (jsonErr) { }
         }
       }
       await popNotification('ЭГИДА', `Модуль ${id} готов.`);
@@ -187,14 +167,11 @@ function useLocalModels(host: string) {
     }
   };
 
-  useEffect(() => {
-    return () => pullController?.abort();
-  }, [pullController]);
+  useEffect(() => { return () => pullController?.abort(); }, [pullController]);
 
   return { installed, pulling, progress, fetchInstalled, remove, download };
 }
 
-// --- ВИЗУАЛИЗАЦИЯ И МЕМОИЗАЦИЯ (PREVENT RENDER LAG) ---
 const LogItem = memo(({ log, index, report, isActive, localError, onAnalyze }: any) => {
   const isDangerous = report && DANGEROUS_REGEX.test(report.solution);
 
@@ -249,11 +226,8 @@ const LogItem = memo(({ log, index, report, isActive, localError, onAnalyze }: a
   );
 });
 
-// --- ОСНОВНОЙ КОРЕНЬ (ROOT) ---
 export default function App() {
-  const [themeMode, setThemeMode] = useState<'dark' | 'light'>(() => {
-    return (localStorage.getItem('THEME') as 'dark' | 'light') || 'dark';
-  });
+  const [themeMode, setThemeMode] = useState<'dark' | 'light'>(() => (localStorage.getItem('THEME') as 'dark' | 'light') || 'dark');
 
   useEffect(() => {
     document.documentElement.classList.toggle('dark', themeMode === 'dark');
@@ -280,28 +254,17 @@ export default function App() {
     }
   }, [draftOllamaHost, ollamaHost]);
 
-  const [provider, setProvider] = useState<'gemini' | 'openai' | 'deepseek' | 'ollama'>(() => {
-    return (localStorage.getItem('AEGIS_PROVIDER') as any) || 'gemini';
-  });
+  const [provider, setProvider] = useState<'gemini' | 'openai' | 'deepseek' | 'ollama'>(() => (localStorage.getItem('AEGIS_PROVIDER') as any) || 'gemini');
   const [modelHash, setModelHash] = useState(() => localStorage.getItem('OLLAMA_MODEL') || 'phi3:mini');
 
-  useEffect(() => {
-    localStorage.setItem('AEGIS_PROVIDER', provider);
-  }, [provider]);
-
-  useEffect(() => {
-    localStorage.setItem('OLLAMA_MODEL', modelHash);
-  }, [modelHash]);
-
-  useEffect(() => {
-    localStorage.setItem('OLLAMA_HOST', ollamaHost);
-  }, [ollamaHost]);
+  useEffect(() => { localStorage.setItem('AEGIS_PROVIDER', provider); }, [provider]);
+  useEffect(() => { localStorage.setItem('OLLAMA_MODEL', modelHash); }, [modelHash]);
+  useEffect(() => { localStorage.setItem('OLLAMA_HOST', ollamaHost); }, [ollamaHost]);
 
   const { apiKey, save: setApiKey } = useSecureStore();
   const ollamaStatus = useOllamaHealth(ollamaHost);
   const engines = useLocalModels(ollamaHost);
 
-  // OOM-Save (CWE-400): Stream API Parser для обработки гигантских логов
   const fileReaderController = useRef<AbortController | null>(null);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -309,110 +272,68 @@ export default function App() {
     if (!file) return;
     setWorkingFile(file.name);
 
-    // Сброс состояния предыдущего файла (Fix State Bleed CWE-200)
-    setRawLogs([]);
-    setReports({});
-    setActiveJobs({});
-    setLocalErrors({});
-
-    // Блокировка гонки состояний (Race Condition)
-    if (fileReaderController.current) {
-      fileReaderController.current.abort();
-    }
+    setRawLogs([]); setReports({}); setActiveJobs({}); setLocalErrors({});
+    if (fileReaderController.current) fileReaderController.current.abort();
     const ac = new AbortController();
     fileReaderController.current = ac;
 
     try {
-      // NOTE (DLP): В перспективе рекомендуется вынести первичный парсинг и маскировку логов (DLP)
-      // в Web Worker или на сторону Rust-бэкенда, чтобы не блокировать Main Thread.
       const stream = file.stream();
       const reader = stream.getReader();
       const decoder = new TextDecoder();
       let partialLine = '';
       let lineCounter = 0;
-      const MAX_LINES = 10000; // Жёсткий лимит защиты V8 RAM
-      const MAX_LINE_LENGTH = 5000; // Защита от OOM при отсутствии переносов строк (Огромные DUMP/JSON)
+      const MAX_LINES = 10000;
+      const MAX_LINE_LENGTH = 5000;
       const newLogs: LogEntry[] = [];
 
       try {
         while (true) {
-          if (ac.signal.aborted) {
-            await reader.cancel("User aborted / Race condition");
-            break;
-          }
-
+          if (ac.signal.aborted) { await reader.cancel("User aborted / Race condition"); break; }
           const { done, value } = await reader.read();
           if (done) break;
 
-          const text = decoder.decode(value, { stream: true });
-          partialLine += text;
+          partialLine += decoder.decode(value, { stream: true });
 
           if (partialLine.includes('\n')) {
             const lines = partialLine.split('\n');
-            partialLine = lines.pop() || ''; // Последний кусок (без \n) оставляем в буфере
+            partialLine = lines.pop() || '';
 
             for (const line of lines) {
               const rawLine = line.trim();
               if (rawLine) {
-                // Обрезаем чересчур длинную строку ПЕРЕД маскировкой (Защита от ReDoS)
                 const safeLine = rawLine.length > MAX_LINE_LENGTH ? rawLine.substring(0, MAX_LINE_LENGTH) + '...[TRUNC]' : rawLine;
-                newLogs.push({
-                  id: `L${lineCounter++}`,
-                  rawLine: safeLine,
-                  maskedLine: maskSensitiveData(safeLine),
-                  isError: /(error|fail|panic|exception|fatal|warn|killed)/i.test(safeLine)
-                });
+                newLogs.push({ id: `L${lineCounter++}`, rawLine: safeLine, maskedLine: maskSensitiveData(safeLine), isError: /(error|fail|panic|exception|fatal|warn|killed)/i.test(safeLine) });
               }
-              if (newLogs.length >= MAX_LINES) {
-                await reader.cancel("Security Limit: Max Lines");
-                break;
-              }
+              if (newLogs.length >= MAX_LINES) { await reader.cancel("Security Limit: Max Lines"); break; }
             }
           } else if (partialLine.length > MAX_LINE_LENGTH * 2) {
-            // Защита от бинарных файлов и бесконечных строк БЕЗ переносов
             const chunk = partialLine.substring(0, MAX_LINE_LENGTH);
-            partialLine = ''; // Очищаем буфер, ИНАЧЕ хвост станет "новой строкой" (Fix Audit Minor 2)
-
-            newLogs.push({
-              id: `L${lineCounter++}`,
-              rawLine: chunk + '... [TRUNCATED_BY_AEGIS]',
-              maskedLine: maskSensitiveData(chunk) + '... [TRUNCATED]',
-              isError: /(error|fail|panic|exception|fatal|warn|killed)/i.test(chunk)
-            });
+            partialLine = '';
+            newLogs.push({ id: `L${lineCounter++}`, rawLine: chunk + '...[TRUNCATED_BY_AEGIS]', maskedLine: maskSensitiveData(chunk) + '... [TRUNCATED]', isError: /(error|fail|panic|exception|fatal|warn|killed)/i.test(chunk) });
           }
           if (newLogs.length >= MAX_LINES) break;
         }
 
-        // Добиваем хвост
         if (!ac.signal.aborted && partialLine.trim() && newLogs.length < MAX_LINES) {
           const safeLine = partialLine.length > MAX_LINE_LENGTH ? partialLine.substring(0, MAX_LINE_LENGTH) + '...[TRUNC]' : partialLine.trim();
-          newLogs.push({
-            id: `L${lineCounter++}`,
-            rawLine: safeLine,
-            maskedLine: maskSensitiveData(safeLine),
-            isError: /(error|fail|panic|exception|fatal|warn|killed)/i.test(safeLine)
-          });
+          newLogs.push({ id: `L${lineCounter++}`, rawLine: safeLine, maskedLine: maskSensitiveData(safeLine), isError: /(error|fail|panic|exception|fatal|warn|killed)/i.test(safeLine) });
         }
       } finally {
         reader.releaseLock();
       }
 
-      if (!ac.signal.aborted) {
-        setRawLogs(newLogs);
-      }
+      if (!ac.signal.aborted) setRawLogs(newLogs);
     } catch (err: any) {
       if (err.name !== 'AbortError') console.error("[Tauri-Core]: File read error", err);
     }
   };
 
   const authState = useRef({ apiKey, provider, modelHash, ollamaHost });
-  useEffect(() => {
-    authState.current = { apiKey, provider, modelHash, ollamaHost };
-  }, [apiKey, provider, modelHash, ollamaHost]);
+  useEffect(() => { authState.current = { apiKey, provider, modelHash, ollamaHost }; }, [apiKey, provider, modelHash, ollamaHost]);
 
   const runAnalysis = useCallback(async (log: LogEntry) => {
     const currentAuth = authState.current;
-
     if (currentAuth.provider !== 'ollama' && !currentAuth.apiKey) {
       setLocalErrors(prev => ({ ...prev, [log.id]: '[Tauri-Auth-Module]: Отсутствует ключ провайдера.' }));
       return;
@@ -424,15 +345,10 @@ export default function App() {
     let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
     try {
-      // IPC Timeout Timeout Guard + Job ID для отмены (CWE-400 Fix)
       const invokePromise = invoke<AIAnalysis>('analyze_log_bridge', {
-        job_id: log.id,
-        provider: currentAuth.provider,
-        token: currentAuth.apiKey,
-        model: currentAuth.modelHash,
-        prompt: log.maskedLine,
-        locale: navigator.language || 'en-US',
-        ollama_host: currentAuth.ollamaHost
+        job_id: log.id, provider: currentAuth.provider, token: currentAuth.apiKey,
+        model: currentAuth.modelHash, prompt: log.maskedLine,
+        locale: navigator.language || 'en-US', ollama_host: currentAuth.ollamaHost
       });
 
       const timeoutPromise = new Promise<never>((_, reject) => {
@@ -447,24 +363,19 @@ export default function App() {
     } catch (err: any) {
       setLocalErrors(prev => ({ ...prev, [log.id]: err.toString() }));
     } finally {
-      if (timeoutId !== undefined) {
-        clearTimeout(timeoutId);
-      }
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
       setActiveJobs(prev => ({ ...prev, [log.id]: false }));
     }
   }, []);
 
   const errorCount = useMemo(() => rawLogs.filter(l => l.isError).length, [rawLogs]);
 
-  useEffect(() => {
-    if (configOpen && ollamaStatus === 'online') engines.fetchInstalled();
-  }, [configOpen, ollamaStatus]);
+  useEffect(() => { if (configOpen && ollamaStatus === 'online') engines.fetchInstalled(); }, [configOpen, ollamaStatus]);
 
   return (
     <div className="h-screen w-screen flex flex-col bg-[#e8e6e1] text-[#111] dark:bg-[#050505] dark:text-[#E0E0E0] font-mono border-4 border-[#111] dark:border-[#1c1c1c] overflow-hidden"
       style={{ backgroundImage: `linear-gradient(rgba(128,128,128,0.15) 1px, transparent 1px), linear-gradient(90deg, rgba(128,128,128,0.15) 1px, transparent 1px)`, backgroundSize: '30px 30px' }}>
 
-      {/* DRAG HEADER */}
       <div onPointerDown={() => invoke('win_drag').catch(() => null)} className="h-10 flex justify-between items-center px-4 border-b-2 border-[#111] dark:border-[#1c1c1c] bg-black/10 cursor-move select-none shrink-0">
         <div className="text-[10px] text-zinc-500 font-bold tracking-widest flex items-center gap-2">
           <ShieldCheck className="w-4 h-4 text-zinc-400" /> AEGIS // KERNEL_DIAGNOSTIC [SECURE]
@@ -479,7 +390,6 @@ export default function App() {
         {configOpen && (
           <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="fixed inset-0 z-[100] flex items-center justify-center p-4 bg-black/60 backdrop-blur-md" onClick={() => setConfigOpen(false)}>
             <div onClick={(e) => e.stopPropagation()} className="bg-[#f4f2ee] dark:bg-[#0A0A0A] border-4 border-[#111] dark:border-[#1c1c1c] w-full max-w-4xl max-h-[85vh] flex flex-col shadow-[16px_16px_0_0_rgba(0,0,0,0.6)]">
-              {/* Configuration Modal Body */}
               <div className="text-white font-bold p-4 flex justify-between items-center text-sm uppercase bg-orange-500 dark:bg-orange-600">
                 <span className="flex items-center gap-2"><HardDrive className="w-5 h-5" /> Управление узлами (OLLAMA_CORE)</span>
                 <button onClick={() => setConfigOpen(false)} className="px-3 py-1 bg-black/20 hover:bg-black/50 transition border border-white/20">ЗАКРЫТЬ [X]</button>
@@ -491,23 +401,14 @@ export default function App() {
                     <Zap className="w-4 h-4 text-zinc-500" /> СЕТЕВАЯ КОНФИГУРАЦИЯ УЗЛА
                   </h3>
                   <div className="flex gap-4">
-                    <input
-                      type="text"
-                      value={draftOllamaHost}
-                      onChange={e => setDraftOllamaHost(e.target.value)}
-                      onBlur={applyNetworkConfig}
-                      placeholder="http://127.0.0.1:11434"
-                      className="flex-1 p-3 border-2 border-[#111] dark:border-[#1c1c1c] bg-[#ddd] dark:bg-[#111] text-[#111] dark:text-[#E0E0E0] outline-none font-mono text-xs focus:border-black dark:focus:border-white transition-colors"
-                    />
-                    <button
-                      onClick={applyNetworkConfig}
-                      className="px-6 py-2 border-2 font-bold uppercase text-xs transition-colors border-black dark:border-white hover:bg-black dark:hover:bg-white hover:text-white dark:hover:text-black">
+                    <input type="text" value={draftOllamaHost} onChange={e => setDraftOllamaHost(e.target.value)} onBlur={applyNetworkConfig} placeholder="http://127.0.0.1:11434"
+                      className="flex-1 p-3 border-2 border-[#111] dark:border-[#1c1c1c] bg-[#ddd] dark:bg-[#111] text-[#111] dark:text-[#E0E0E0] outline-none font-mono text-xs focus:border-black dark:focus:border-white transition-colors" />
+                    <button onClick={applyNetworkConfig} className="px-6 py-2 border-2 font-bold uppercase text-xs transition-colors border-black dark:border-white hover:bg-black dark:hover:bg-white hover:text-white dark:hover:text-black">
                       ПРИМЕНИТЬ
                     </button>
                   </div>
                 </div>
 
-                {/* Local Models Box */}
                 <div>
                   <h3 className="font-bold border-b-2 border-black/20 dark:border-white/20 pb-2 mb-4 uppercase flex items-center gap-2">
                     <Lock className="w-4 h-4 text-zinc-500" /> СЕКРЕТНЫЙ АНКЛАВ (ЛОКАЛЬНО)
@@ -563,13 +464,9 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Install Panel */}
                 <div className="mt-6 flex flex-col gap-2">
-                  <input type="text" placeholder="CUSTOM_MODEL:TAG"
-                    value={customModelTag}
-                    onChange={e => setCustomModelTag(e.target.value)}
-                    className="flex-1 p-3 border-2 border-[#111] dark:border-[#1c1c1c] bg-[#ddd] dark:bg-[#111] text-[#111] dark:text-[#E0E0E0] outline-none font-mono text-xs uppercase focus:border-black dark:focus:border-white transition-colors"
-                  />
+                  <input type="text" placeholder="CUSTOM_MODEL:TAG" value={customModelTag} onChange={e => setCustomModelTag(e.target.value)}
+                    className="flex-1 p-3 border-2 border-[#111] dark:border-[#1c1c1c] bg-[#ddd] dark:bg-[#111] text-[#111] dark:text-[#E0E0E0] outline-none font-mono text-xs uppercase focus:border-black dark:focus:border-white transition-colors" />
                   <button onClick={() => {
                     const val = sanitizeInputTag(customModelTag);
                     if (val) engines.download(val, () => { setModelHash(val); setCustomModelTag(''); });
@@ -583,7 +480,6 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      {/* НОВЫЙ ДИНАМИЧЕСКИЙ АЛЕРТ ПРО OLLAMA */}
       {ollamaStatus !== 'online' && ollamaStatus !== 'checking' && (
         <div className={`shrink-0 border-b-4 p-3 flex justify-between items-center ${ollamaStatus === 'missing' ? 'border-[#FF3333] bg-[#FF3333]/10' : 'border-[#F3A536] bg-[#F3A536]/10'}`}>
           <div className="flex items-center gap-3">
@@ -606,7 +502,6 @@ export default function App() {
         </div>
       )}
 
-      {/* TOOLBAR */}
       <section className="p-4 border-b-2 border-[#111] dark:border-[#1c1c1c] flex flex-wrap gap-4 items-center bg-black/5 shrink-0 z-10 box-shadow-md">
         <div className="flex gap-2 bg-black p-1 border border-zinc-800">
           {['gemini', 'openai', 'deepseek', 'ollama'].map(p => (
@@ -627,7 +522,6 @@ export default function App() {
         </button>
       </section>
 
-      {/* MAIN VIEW */}
       <main className="flex-1 overflow-hidden relative">
         {rawLogs.length === 0 ? (
           <div className="h-full flex flex-col items-center justify-center m-10 border-4 border-dashed border-zinc-500/50 text-zinc-500">
@@ -640,15 +534,7 @@ export default function App() {
             style={{ height: '100%', width: '100%' }}
             totalCount={rawLogs.length}
             itemContent={index => (
-              <LogItem
-                key={rawLogs[index].id}
-                log={rawLogs[index]}
-                index={index}
-                report={reports[rawLogs[index].id]}
-                isActive={activeJobs[rawLogs[index].id]}
-                localError={localErrors[rawLogs[index].id]}
-                onAnalyze={runAnalysis}
-              />
+              <LogItem key={rawLogs[index].id} log={rawLogs[index]} index={index} report={reports[rawLogs[index].id]} isActive={activeJobs[rawLogs[index].id]} localError={localErrors[rawLogs[index].id]} onAnalyze={runAnalysis} />
             )}
           />
         )}
