@@ -10,6 +10,12 @@
 
 ![AEGIS Architecture](https://img.shields.io/badge/Architecture-Tauri%20%2B%20React-blue) ![Rust](https://img.shields.io/badge/Backend-Rust-orange) ![Tailwind v4](https://img.shields.io/badge/Styling-Tailwind%20v4-38B2AC) ![Security](https://img.shields.io/badge/Security-OS_Keyring_|_DLP_Masking-red)
 
+---
+
+<img width="900" height="800" alt="111" src="https://github.com/user-attachments/assets/33227e06-697c-490c-b676-d48b60e4ddd4" />
+
+---
+
 ## 🚀 Features
 - **Local-First AI Integration:** Fully supports local execution via **Ollama** (`phi3`, `llama3`, etc.) ensuring absolute privacy.
 - **Enterprise-Grade DLP (Data Loss Prevention):** Automatically masks IP addresses, JWT tokens, Emails, and API keys *before* any text reaches memory or is sent over the network.
@@ -17,6 +23,16 @@
 - **Hardware-Backed Secrets (CWE-312):** API keys are natively stored within your OS Secure Enclave (Apple Keychain, Windows Credential Manager, Linux Secret Service) using Rust `keyring`.
 - **Dynamic Localization:** AI output is automatically translated to match your OS language securely without exposing prompt-injection vulnerabilities (CWE-20).
 - **Modern UI Edge:** Fully responsive interface built with Tailwind CSS v4, Framer Motion, and React Virtuoso for buttery-smooth list rendering.
+
+---
+
+<img width="900" height="800" alt="22" src="https://github.com/user-attachments/assets/14344c9b-e89d-4bff-98f2-048dc567f90c" />
+
+---
+
+<img width="900" height="800" alt="33" src="https://github.com/user-attachments/assets/2cd4337f-44d8-468a-abe0-5ed7abbe6a8b" />
+
+---
 
 ## 🛠️ Tech Stack
 **Frontend:** React 19, Vite, Tailwind CSS v4, Framer Motion, Lucide React.  
