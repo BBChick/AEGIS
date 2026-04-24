@@ -164,8 +164,12 @@ async fn analyze_log_bridge(
                                 }
                                 
                                 if is_safe {
-                                    final_ip = Some(ip);
-                                    break;
+                                    if final_ip.is_none() || ip.is_ipv4() {
+                                        final_ip = Some(ip);
+                                    }
+                                    if ip.is_ipv4() {
+                                        break; // Нашли безопасный IPv4 (Ollama биндится на 127.0.0.1)
+                                    }
                                 }
                             }
                         }
